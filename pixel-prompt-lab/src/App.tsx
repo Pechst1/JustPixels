@@ -22,6 +22,7 @@ type PixelState = {
   mixImg: number; // 0 -> A, 1 -> B
   mixInit: boolean;
 };
+type PixelEffectOffset = { offsetX: number; offsetY: number; rotation: number; scale: number };
 
 export default function App() {
   // --- Images ---
@@ -128,11 +129,7 @@ export default function App() {
   const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
   const clamp = (v: number, a: number, b: number) => Math.min(Math.max(v, a), b);
   const easeInOutCubic = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
-
-  const aspectPercent = (w: number, h: number) => {
-    if (!w || !h) return 56.25; // default 16:9
-    return (h / w) * 100;
-  };
+  const srgbToLinear = (c: number) => (c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4));
 
   // Build quick CPU sampler from an image element at target size
   const makePhotoSampler = (img: HTMLImageElement, w: number, h: number): Sampler => {
@@ -234,7 +231,13 @@ export default function App() {
   useEffect(() => { const onKey = (e: KeyboardEvent) => { const target = e.target as HTMLElement | null; if (target && ["INPUT", "TEXTAREA"].includes(target.tagName)) return; if (e.code === "Space") { e.preventDefault(); setPlaying((p) => !p); startTimeRef.current = 0; } else if (e.key.toLowerCase() === "f") toggleFullscreen(); else if (e.key.toLowerCase() === "d") downloadImage(); else if (e.key.toLowerCase() === "r") resetSettings(); else if (e.key.toLowerCase() === "s") restartScramble(); }; window.addEventListener("keydown", onKey); return () => window.removeEventListener("keydown", onKey); }, []);
 
   // ---------- Effects (2D) ----------
-  const calculateEffectOffset = (x: number, y: number, time: number, pixelState: PixelState, pxSize: number) => {
+  const calculateEffectOffset = (
+    x: number,
+    y: number,
+    time: number,
+    pixelState: PixelState,
+    pxSize: number
+  ): PixelEffectOffset => {
     let offsetX = 0, offsetY = 0, rotation = 0, scale = 1;
 
     // Guards to avoid accessing undefined on first frames
@@ -345,7 +348,8 @@ export default function App() {
       initPixelStates2D(4, 4, false);
       const ps = pixelStatesRef.current[1][1];
       const fx0 = calculateEffectOffset(1, 1, 0, ps, 16);
-      console.assert(['offsetX','offsetY','rotation','scale'].every(k => typeof fx0[k] === 'number'), 'effect offset shape');
+      const keys: (keyof PixelEffectOffset)[] = ['offsetX', 'offsetY', 'rotation', 'scale'];
+      console.assert(keys.every((k) => typeof fx0[k] === 'number'), 'effect offset shape');
 
       // extra test: wave amplitude should influence offset
       const prevAmp = amplitude;
@@ -452,28 +456,6 @@ export default function App() {
     spiralMatRef.current = null; blackHoleMatRef.current = null;
   };
 
-  const createInstanceColorMaterial = () => {
-    return new THREE.ShaderMaterial({
-      uniforms: {},
-      vertexShader: `
-        precision highp float;
-        attribute vec3 position;
-        attribute vec3 instanceColor;
-        attribute mat4 instanceMatrix;
-        varying vec3 vColor;
-        uniform mat4 modelViewMatrix; uniform mat4 projectionMatrix;
-        void main(){ vColor = instanceColor; gl_Position = projectionMatrix * modelViewMatrix * (instanceMatrix * vec4(position,1.0)); }
-      `,
-      fragmentShader: `
-        precision highp float; varying vec3 vColor;
-        void main(){ gl_FragColor = vec4(vColor, 1.0); }
-      `,
-      transparent: false,
-      depthWrite: true,
-      toneMapped: false,
-    });
-  };
-
   const resizeThree = () => { const renderer = threeRendererRef.current; const camera = threeCameraRef.current; const mount = threeMountRef.current; if (!renderer || !camera || !mount) return; const w = mount.clientWidth, h = mount.clientHeight; camera.aspect = w / h; camera.updateProjectionMatrix(); renderer.setSize(w, h); };
 
   // Build voxel scene from image(s) — unlit colours, per-instance setColorAt
@@ -534,7 +516,7 @@ export default function App() {
         dummy.scale.set(scaleXY, h, scaleXY);
         dummy.updateMatrix(); mesh.setMatrixAt(i, dummy.matrix);
 
-        color.setRGB(r, g, b);
+        color.setRGB(r, g, b).convertSRGBToLinear();
         mesh.setColorAt(i, color);
         i++;
       }
@@ -604,7 +586,8 @@ export default function App() {
         dummy.scale.set(s, s, s);
         dummy.updateMatrix(); mesh.setMatrixAt(i, dummy.matrix);
 
-        color.setRGB(r, g, b); mesh.setColorAt(i, color);
+        color.setRGB(r, g, b).convertSRGBToLinear();
+        mesh.setColorAt(i, color);
 
         baseX[i] = px; baseY[i] = py; baseZ[i] = pz; phase[i] = Math.random() * Math.PI * 2; radii[i] = s; i++;
       }
@@ -624,7 +607,6 @@ export default function App() {
     ensureThree(); const root = threeRootRef.current; if (!root) return; disposeThreeObjects();
     const { sampleA, sampleB } = getPhotoSampleFns(); if (!sampleA) return;
 
-    const toLinear = (c: number) => (c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4));
     const count = clamp(spiralCount, 2000, 120000);
     const positions = new Float32Array(count * 3); const colors = new Float32Array(count * 3); const sizes = new Float32Array(count);
 
@@ -646,7 +628,7 @@ export default function App() {
       g = clamp(g * colorGain, 0, 1);
       b = clamp(b * colorGain, 0, 1);
       // now convert to linear colour space
-      r = toLinear(r); g = toLinear(g); b = toLinear(b);
+      r = srgbToLinear(r); g = srgbToLinear(g); b = srgbToLinear(b);
 
       positions[i * 3] = Math.cos(angle) * radius;
       positions[i * 3 + 1] = height;
@@ -720,7 +702,7 @@ export default function App() {
       const x = Math.cos(a0) * r0, y = h0, z = Math.sin(a0) * r0;
       positions[i * 3] = x; positions[i * 3 + 1] = y; positions[i * 3 + 2] = z;
       polar[i * 3] = r0; polar[i * 3 + 1] = a0; polar[i * 3 + 2] = h0;
-      colors[i * 3] = r; colors[i * 3 + 1] = g; colors[i * 3 + 2] = b;
+      colors[i * 3] = srgbToLinear(r); colors[i * 3 + 1] = srgbToLinear(g); colors[i * 3 + 2] = srgbToLinear(b);
       sizes[i] = 0.9 + Math.random() * 1.6;
     }
 
